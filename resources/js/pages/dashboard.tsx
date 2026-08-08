@@ -1,28 +1,218 @@
 import { Head } from '@inertiajs/react';
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { useForm } from '@inertiajs/react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { firestore } from '@/lib/firebase';
 import { dashboard } from '@/routes';
+import {
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    onSnapshot,
+    orderBy,
+    query,
+    serverTimestamp,
+    updateDoc,
+} from 'firebase/firestore';
+import { PackagePlus, Pencil, Trash2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
+
+type InventoryForm = {
+    name: string;
+    price: string;
+    description: string;
+    categoryId: string;
+    quantity: string;
+    supplier: string;
+};
+
+type InventoryItem = InventoryForm & {
+    id: string;
+};
+
+const emptyInventoryForm: InventoryForm = {
+    name: '',
+    price: '',
+    description: '',
+    categoryId: '',
+    quantity: '',
+    supplier: '',
+};
 
 export default function Dashboard() {
-    const form = useForm({
-        name: '',
-        price: '',
-        description: '',
-        category_id: '',
-        quantity: '',
-        supplier: '',
-    });
+    const [inventoryForm, setInventoryForm] =
+        useState<InventoryForm>(emptyInventoryForm);
+    const [inventoryErrors, setInventoryErrors] = useState<
+        Partial<Record<keyof InventoryForm, string>>
+    >({});
+    const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+    const [editingInventoryId, setEditingInventoryId] = useState<string | null>(
+        null,
+    );
+    const [isSavingInventory, setIsSavingInventory] = useState(false);
+    const [deletingInventoryId, setDeletingInventoryId] = useState<
+        string | null
+    >(null);
 
-    function submit(event: React.FormEvent<HTMLFormElement>) {
+    useEffect(() => {
+        const inventoryQuery = query(
+            collection(firestore, 'inventories'),
+            orderBy('createdAt', 'desc'),
+        );
+
+        const unsubscribe = onSnapshot(
+            inventoryQuery,
+            (snapshot) => {
+                setInventoryItems(
+                    snapshot.docs.map((inventoryDoc) => {
+                        const data = inventoryDoc.data();
+
+                        return {
+                            id: inventoryDoc.id,
+                            name: String(data.name ?? ''),
+                            price: String(data.price ?? ''),
+                            description: String(data.description ?? ''),
+                            categoryId: String(data.categoryId ?? ''),
+                            quantity: String(data.quantity ?? ''),
+                            supplier: String(data.supplier ?? ''),
+                        };
+                    }),
+                );
+            },
+            (error) => {
+                console.error(error);
+                toast.error('Unable to load inventory from Firestore.');
+            },
+        );
+
+        return unsubscribe;
+    }, []);
+
+    function updateInventoryField(field: keyof InventoryForm, value: string) {
+        setInventoryForm((current) => ({
+            ...current,
+            [field]: value,
+        }));
+        setInventoryErrors((current) => ({
+            ...current,
+            [field]: undefined,
+        }));
+    }
+
+    function validateInventoryForm() {
+        const errors: Partial<Record<keyof InventoryForm, string>> = {};
+
+        if (!inventoryForm.name.trim()) {
+            errors.name = 'Name is required.';
+        }
+
+        if (!inventoryForm.price) {
+            errors.price = 'Price is required.';
+        }
+
+        if (!inventoryForm.categoryId) {
+            errors.categoryId = 'Category ID is required.';
+        }
+
+        if (!inventoryForm.quantity) {
+            errors.quantity = 'Quantity is required.';
+        }
+
+        if (!inventoryForm.supplier.trim()) {
+            errors.supplier = 'Supplier is required.';
+        }
+
+        setInventoryErrors(errors);
+
+        return Object.keys(errors).length === 0;
+    }
+
+    async function submitInventory(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
 
-        form.post('/products', {
-            onSuccess: () => {
-                form.reset();
-            },
+        if (!validateInventoryForm()) {
+            return;
+        }
+
+        setIsSavingInventory(true);
+
+        try {
+            const inventoryData = {
+                name: inventoryForm.name.trim(),
+                price: Number(inventoryForm.price),
+                description: inventoryForm.description.trim(),
+                categoryId: Number(inventoryForm.categoryId),
+                quantity: Number(inventoryForm.quantity),
+                supplier: inventoryForm.supplier.trim(),
+            };
+
+            if (editingInventoryId) {
+                await updateDoc(
+                    doc(firestore, 'inventories', editingInventoryId),
+                    {
+                        ...inventoryData,
+                        updatedAt: serverTimestamp(),
+                    },
+                );
+
+                setEditingInventoryId(null);
+                toast.success('Inventory item updated in Firebase Firestore.');
+            } else {
+                await addDoc(collection(firestore, 'inventories'), {
+                    ...inventoryData,
+                    createdAt: serverTimestamp(),
+                });
+
+                toast.success('Inventory item saved to Firebase Firestore.');
+            }
+
+            setInventoryForm(emptyInventoryForm);
+        } catch (error) {
+            console.error(error);
+            toast.error('Unable to save inventory item in Firestore.');
+        } finally {
+            setIsSavingInventory(false);
+        }
+    }
+
+    function editInventoryItem(item: InventoryItem) {
+        setEditingInventoryId(item.id);
+        setInventoryForm({
+            name: item.name,
+            price: item.price,
+            description: item.description,
+            categoryId: item.categoryId,
+            quantity: item.quantity,
+            supplier: item.supplier,
         });
+        setInventoryErrors({});
+    }
+
+    function cancelInventoryEdit() {
+        setEditingInventoryId(null);
+        setInventoryForm(emptyInventoryForm);
+        setInventoryErrors({});
+    }
+
+    async function deleteInventoryItem(itemId: string) {
+        setDeletingInventoryId(itemId);
+
+        try {
+            await deleteDoc(doc(firestore, 'inventories', itemId));
+
+            if (editingInventoryId === itemId) {
+                cancelInventoryEdit();
+            }
+
+            toast.success('Inventory item deleted from Firebase Firestore.');
+        } catch (error) {
+            console.error(error);
+            toast.error('Unable to delete inventory item from Firestore.');
+        } finally {
+            setDeletingInventoryId(null);
+        }
     }
 
     return (
@@ -31,122 +221,246 @@ export default function Dashboard() {
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <div>
-                    <h1 className="text-xl font-semibold">Products</h1>
+                    <h1 className="text-xl font-semibold">Inventory</h1>
                     <p className="text-sm text-muted-foreground">
-                        Welcome to your Products
+                        Manage inventory records stored in Firebase Firestore.
                     </p>
                 </div>
 
                 <form
-                    className="max-w-xs space-y-4 rounded-lg border p-4"
-                    onSubmit={submit}
+                    className="grid w-full max-w-2xl gap-4 rounded-lg border p-4 md:grid-cols-2"
+                    onSubmit={submitInventory}
                 >
+                    <div className="md:col-span-2">
+                        <h2 className="text-lg font-semibold">
+                            {editingInventoryId
+                                ? 'Edit Inventory'
+                                : 'New Inventory'}
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                            Inventory entries are saved directly to Firebase
+                            Firestore.
+                        </p>
+                    </div>
+
                     <div className="space-y-2">
-                        <Label htmlFor="name">Name:</Label>
+                        <Label htmlFor="inventory-name">Name</Label>
                         <Input
+                            id="inventory-name"
                             type="text"
-                            id="name"
-                            value={form.data.name}
+                            value={inventoryForm.name}
                             onChange={(event) =>
-                                form.setData('name', event.target.value)
+                                updateInventoryField('name', event.target.value)
                             }
                         />
-                        {form.errors.name && (
-                            <p className="text-red-600">{form.errors.name}</p>
+                        {inventoryErrors.name && (
+                            <p className="text-sm text-red-600">
+                                {inventoryErrors.name}
+                            </p>
                         )}
                     </div>
 
                     <div className="space-y-2">
-                        <Label htmlFor="price">Price:</Label>
+                        <Label htmlFor="inventory-price">Price</Label>
                         <Input
+                            id="inventory-price"
                             type="number"
-                            id="price"
-                            value={form.data.price}
+                            min="0"
+                            step="0.01"
+                            value={inventoryForm.price}
                             onChange={(event) =>
-                                form.setData('price', event.target.value)
+                                updateInventoryField(
+                                    'price',
+                                    event.target.value,
+                                )
                             }
                         />
-                        {form.errors.price && (
-                            <p className="text-red-600">{form.errors.price}</p>
+                        {inventoryErrors.price && (
+                            <p className="text-sm text-red-600">
+                                {inventoryErrors.price}
+                            </p>
                         )}
                     </div>
 
-                    <div className="space-y-2">
-                        <Label htmlFor="description">Description:</Label>
+                    <div className="space-y-2 md:col-span-2">
+                        <Label htmlFor="inventory-description">
+                            Description
+                        </Label>
                         <Input
+                            id="inventory-description"
                             type="text"
-                            id="description"
-                            value={form.data.description}
+                            value={inventoryForm.description}
                             onChange={(event) =>
-                                form.setData('description', event.target.value)
+                                updateInventoryField(
+                                    'description',
+                                    event.target.value,
+                                )
                             }
                         />
-                        {form.errors.description && (
-                            <p className="text-red-600">{form.errors.description}</p>
-                        )}
                     </div>
 
                     <div className="space-y-2">
-                        <Label htmlFor="category_id">Category ID:</Label>
+                        <Label htmlFor="inventory-category-id">
+                            Category ID
+                        </Label>
                         <Input
+                            id="inventory-category-id"
                             type="number"
-                            id="category_id"
-                            value={form.data.category_id}
+                            min="0"
+                            value={inventoryForm.categoryId}
                             onChange={(event) =>
-                                form.setData('category_id', event.target.value)
+                                updateInventoryField(
+                                    'categoryId',
+                                    event.target.value,
+                                )
                             }
                         />
-                        {form.errors.category_id && (
-                            <p className="text-red-600">{form.errors.category_id}</p>
+                        {inventoryErrors.categoryId && (
+                            <p className="text-sm text-red-600">
+                                {inventoryErrors.categoryId}
+                            </p>
                         )}
-
                     </div>
 
                     <div className="space-y-2">
-                        <Label htmlFor="quantity">Quantity:</Label>
+                        <Label htmlFor="inventory-quantity">Quantity</Label>
                         <Input
+                            id="inventory-quantity"
                             type="number"
-                            id="quantity"
-                            value={form.data.quantity}
+                            min="0"
+                            value={inventoryForm.quantity}
                             onChange={(event) =>
-                                form.setData('quantity', event.target.value)
+                                updateInventoryField(
+                                    'quantity',
+                                    event.target.value,
+                                )
                             }
                         />
-                        {form.errors.quantity && (
-                            <p className="text-red-600">{form.errors.quantity}</p>
+                        {inventoryErrors.quantity && (
+                            <p className="text-sm text-red-600">
+                                {inventoryErrors.quantity}
+                            </p>
                         )}
                     </div>
 
-                    <div className="space-y-2">
-                        <Label htmlFor="supplier">Supplier:</Label>
+                    <div className="space-y-2 md:col-span-2">
+                        <Label htmlFor="inventory-supplier">Supplier</Label>
                         <Input
+                            id="inventory-supplier"
                             type="text"
-                            id="supplier"
-                            value={form.data.supplier}
+                            value={inventoryForm.supplier}
                             onChange={(event) =>
-                                form.setData('supplier', event.target.value)
+                                updateInventoryField(
+                                    'supplier',
+                                    event.target.value,
+                                )
                             }
                         />
-                        {form.errors.supplier && (
-                            <p className="text-red-600">{form.errors.supplier}</p>
+                        {inventoryErrors.supplier && (
+                            <p className="text-sm text-red-600">
+                                {inventoryErrors.supplier}
+                            </p>
                         )}
                     </div>
 
-                    <Button type="submit">Save Product</Button>
+                    <div className="md:col-span-2">
+                        <Button type="submit" disabled={isSavingInventory}>
+                            <PackagePlus />
+                            {isSavingInventory
+                                ? 'Saving...'
+                                : editingInventoryId
+                                  ? 'Update Inventory'
+                                  : 'Save Inventory'}
+                        </Button>
+                        {editingInventoryId && (
+                            <Button
+                                className="ml-2"
+                                type="button"
+                                variant="outline"
+                                onClick={cancelInventoryEdit}
+                                disabled={isSavingInventory}
+                            >
+                                <X />
+                                Cancel
+                            </Button>
+                        )}
+                    </div>
                 </form>
 
-                {/* <div className="grid auto-rows-min gap-4 md:grid-cols-3">
-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
-                        <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
+                <div className="w-full max-w-2xl space-y-3 rounded-lg border p-4">
+                    <div>
+                        <h2 className="text-lg font-semibold">
+                            Inventory Items
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                            Edit or delete records stored in Firebase Firestore.
+                        </p>
                     </div>
-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
-                        <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
-                    </div>
-                </div>
 
-                <div className="relative min-h-[100vh] flex-1 overflow-hidden rounded-xl border border-sidebar-border/70 md:min-h-min dark:border-sidebar-border">
-                    <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
-                </div> */}
+                    {inventoryItems.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                            No inventory items found.
+                        </p>
+                    ) : (
+                        <div className="space-y-2">
+                            {inventoryItems.map((item) => (
+                                <div
+                                    key={item.id}
+                                    className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"
+                                >
+                                    <div className="min-w-0">
+                                        <p className="font-medium">
+                                            {item.name}
+                                        </p>
+                                        <p className="text-sm text-muted-foreground">
+                                            Price: {item.price} | Quantity:{' '}
+                                            {item.quantity} | Category:{' '}
+                                            {item.categoryId}
+                                        </p>
+                                        <p className="text-sm text-muted-foreground">
+                                            Supplier: {item.supplier}
+                                        </p>
+                                        {item.description && (
+                                            <p className="mt-1 text-sm">
+                                                {item.description}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    <div className="flex shrink-0 gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() =>
+                                                editInventoryItem(item)
+                                            }
+                                        >
+                                            <Pencil />
+                                            Edit
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="destructive"
+                                            size="sm"
+                                            disabled={
+                                                deletingInventoryId === item.id
+                                            }
+                                            onClick={() =>
+                                                deleteInventoryItem(item.id)
+                                            }
+                                        >
+                                            <Trash2 />
+                                            {deletingInventoryId === item.id
+                                                ? 'Deleting...'
+                                                : 'Delete'}
+                                        </Button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
             </div>
         </>
     );
